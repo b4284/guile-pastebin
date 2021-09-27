@@ -13,7 +13,8 @@
         pb-data-close
         call-with-dir-as-pb-data
         pb-data-get-top
-        pb-data-new-entry)
+        pb-data-new-entry
+        pb-get-file-path)
 
 (define-record-type <pb-data>
   (make-pb-data dir)
@@ -39,7 +40,7 @@
       (pb-data-close pb-data)
       R)))
 
-(define (get-file-path pb-data filename)
+(define (pb-get-file-path pb-data filename)
   (string-append (pb-data-dir pb-data) "/" filename))
 
 ;; input: <pb-data>, integer
@@ -49,7 +50,7 @@
    (lambda (filename)
      (make-pb-entry
       filename
-      (call-with-input-file (get-file-path pb-data filename)
+      (call-with-input-file (pb-get-file-path pb-data filename)
         (lambda (port)
           (get-string-all port)))))
    (let ((file-ls (list-files pb-data)))
@@ -59,7 +60,7 @@
 ;; output: <pb-entry>
 (define (pb-data-new-entry pb-data text)
   (let ((next-filename (get-next-filename pb-data)))
-    (call-with-output-file (get-file-path pb-data next-filename)
+    (call-with-output-file (pb-get-file-path pb-data next-filename)
       (lambda (port)
         (put-string port text)))
     (make-pb-entry next-filename text)))

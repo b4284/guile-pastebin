@@ -2,11 +2,14 @@
 
 (use-modules (web request)
              (web response)
+             (web uri)
              (sxml simple)
              (pastebin data)
              (rnrs bytevectors)
              (ice-9 textual-ports)
+             (ice-9 binary-ports)
              (ice-9 regex)
+             (ice-9 match)
              (srfi srfi-1))
 
 (export make-pastebin-handler)
@@ -54,6 +57,9 @@
           (meta (@ (name "viewport") (content "width=device-width, initial-scale=1"))))
          (body ,@body)))
 
+(define (make-raw-link-pb-entry pb-id)
+  `(a (@ (href ,(format #f "/raw/~a" pb-id))) "raw"))
+
 (define (make-pastebin-handler data-path)
   (lambda (request request-body)
     (if (eq? (request-method request) 'POST)
@@ -71,21 +77,47 @@
                    (pb-data-new-entry pb-data
                                       (assoc-ref form-data "text"))))))))
 
-    (values (build-response
-             #:code 200
-             #:headers `((content-type . (text/html))))
+    ;; match raw file
+    (match (split-and-decode-uri-path (uri-path (request-uri request)))
+      (("raw" pb-id)
+       (values (build-response
+                #:code 200
+                #:headers `((content-type . (text/plain))))
 
-            (lambda (port)
-              (let* ((top5 (call-with-dir-as-pb-data
-                            data-path
-                            (lambda (pb-data) (pb-data-get-top pb-data 5))))
-                     (sxml (templatize
-                            "pastebin"
-                            `((form (@ (method "post") (enctype "multipart/form-data"))
-                                    (textarea (@ (name "text")) "") (input (@ (type "submit"))))
-                              (table (@ (border 1)) (tr (th "id") (th "text"))
-                                     ,(map (lambda (entry) `(tr (td ,(pb-entry-id entry))
-                                                                (td ,(pb-entry-text entry))))
-                                           top5))))))
-                (display "<!DOCTYPE html>\n" port)
-                (sxml->xml sxml port))))))
+               (lambda (port)
+                 (call-with-input-file
+                     ;; the file name
+                     (call-with-dir-as-pb-data data-path
+                                               (lambda (p) (pb-get-file-path p pb-id)))
+                   ;; the input port
+                   (lambda (inport)
+                     (let A ((inport' inport))
+                       (let ((bv (get-bytevector-n inport' 4096)))
+                         (if (not (eof-object? bv))
+                             (begin
+                               (put-bytevector port bv)
+                               (A inport'))))))))))
+
+      ;; match everything else
+      (_
+
+       (values (build-response
+                #:code 200
+                #:headers `((content-type . (text/html))))
+
+               (lambda (port)
+                 (let* ((top5 (call-with-dir-as-pb-data
+                               data-path
+                               (lambda (pb-data) (pb-data-get-top pb-data 5))))
+                        (sxml (templatize
+                               "pastebin"
+                               `((form (@ (method "post") (enctype "multipart/form-data"))
+                                       (textarea (@ (name "text")) "") (input (@ (type "submit"))))
+                                 (table (@ (border 1)) (tr (th "id") (th "text") (th ""))
+                                        ,(map (lambda (entry)
+                                                `(tr (td ,(pb-entry-id entry))
+                                                     (td ,(pb-entry-text entry))
+                                                     (td ,(make-raw-link-pb-entry (pb-entry-id entry)))))
+                                              top5))))))
+                   (display "<!DOCTYPE html>\n" port)
+                   (sxml->xml sxml port))))))))
