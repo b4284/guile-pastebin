@@ -57,38 +57,78 @@
           (meta (@ (name "viewport") (content "width=device-width, initial-scale=1"))))
          (body ,@body)))
 
-(define (make-raw-link-pb-entry pb-id)
-  `(a (@ (href ,(format #f "/raw/~a" pb-id))) "raw"))
+(define (post-handler request request-body pb-data-path)
+  (if (eq? (request-method request) 'POST)
+      (let* ((headers (request-headers request))
+             (content-type-all (assq-ref headers 'content-type))
+             (content-type (if content-type-all
+                               (car content-type-all)
+                               #f))
+             (boundary (if (eq? content-type 'multipart/form-data)
+                           (assq-ref (cdr content-type-all) 'boundary)
+                           #f))
+             (reqbody-string (utf8->string request-body))
+             (form-data (if boundary
+                            (read-multipart-form-data reqbody-string boundary)
+                            #f))
+             (new-pb-data (if form-data
+                              (call-with-dir-as-pb-data
+                               pb-data-path
+                               (lambda (pb-data)
+                                 (pb-data-new-entry pb-data
+                                                    (assoc-ref form-data "text"))))
+                              #f)))
+
+        ;; determine what to respond
+        (if (and new-pb-data
+                 (assoc-ref form-data "showUrl"))
+
+            ;; show url after paste
+            (values (build-response
+                     #:code 200
+                     #:headers '((content-type . (text/plain))))
+                    (lambda (port)
+                      (let* ((hostp (assq-ref headers 'host)))
+                        (put-string
+                         port
+                         (uri->string
+                          (build-uri 'http
+                                     #:host (car hostp)
+                                     #:port (cdr hostp)
+                                     #:path (format #f "/raw/~a\r\n"
+                                                    (pb-entry-id new-pb-data))))))))
+
+            ;; respond with 303 See Other
+            (values (build-response
+                     #:code 303
+                     #:headers `((location . ,(build-uri-reference #:path "/"))))
+                    (lambda (port) 1))))
+
+      ;; INVALID request: access /post without HTTP POST
+      (values (build-response #:code 400)
+              (lambda (port) 1))))
 
 (define (make-pastebin-handler data-path)
   (lambda (request request-body)
-    (if (eq? (request-method request) 'POST)
-        (let* ((headers (request-headers request))
-               (content-type-all (assq-ref headers 'content-type))
-               (content-type (if content-type-all (car content-type-all) #f))
-               (boundary (if (eq? content-type 'multipart/form-data)
-                             (assq-ref (cdr content-type-all) 'boundary) #f))
-               (reqbody-string (utf8->string request-body)))
-          (if boundary
-              (let ((form-data (read-multipart-form-data reqbody-string boundary)))
-                (call-with-dir-as-pb-data
-                 data-path
-                 (lambda (pb-data)
-                   (pb-data-new-entry pb-data
-                                      (assoc-ref form-data "text"))))))))
-
-    ;; match raw file
     (match (split-and-decode-uri-path (uri-path (request-uri request)))
+
+      ;; URI: /post -- create paste
+      (("post" . _)
+       (post-handler request request-body data-path))
+
+      ;; URI: /raw/<id> -- return raw content of the paste
       (("raw" pb-id)
        (values (build-response
                 #:code 200
-                #:headers `((content-type . (text/plain))))
+                #:headers '((content-type . (text/plain))))
 
                (lambda (port)
                  (call-with-input-file
                      ;; the file name
-                     (call-with-dir-as-pb-data data-path
-                                               (lambda (p) (pb-get-file-path p pb-id)))
+                     (call-with-dir-as-pb-data
+                      data-path
+                      (lambda (p) (pb-get-file-path p pb-id)))
+
                    ;; the input port
                    (lambda (inport)
                      (let A ((inport' inport))
@@ -98,12 +138,11 @@
                                (put-bytevector port bv)
                                (A inport'))))))))))
 
-      ;; match everything else
+      ;; URI: * -- everything else -- show the top 5 paste list
       (_
-
        (values (build-response
                 #:code 200
-                #:headers `((content-type . (text/html))))
+                #:headers '((content-type . (text/html))))
 
                (lambda (port)
                  (let* ((top5 (call-with-dir-as-pb-data
@@ -111,13 +150,22 @@
                                (lambda (pb-data) (pb-data-get-top pb-data 5))))
                         (sxml (templatize
                                "pastebin"
-                               `((form (@ (method "post") (enctype "multipart/form-data"))
-                                       (textarea (@ (name "text")) "") (input (@ (type "submit"))))
+                               `((form (@ (method "post") (enctype "multipart/form-data")
+                                          (action "/post"))
+                                       (textarea (@ (name "text")) "")
+                                       (input (@ (type "checkbox") (name "showUrl")
+                                                 (id "showUrl") (value "1")))
+                                       (label (@ (for "showUrl")) "Show raw URL after paste")
+                                       (input (@ (type "submit"))))
                                  (table (@ (border 1)) (tr (th "id") (th "text") (th ""))
                                         ,(map (lambda (entry)
                                                 `(tr (td ,(pb-entry-id entry))
                                                      (td ,(pb-entry-text entry))
-                                                     (td ,(make-raw-link-pb-entry (pb-entry-id entry)))))
+                                                     (td
+                                                      (a (@ (href
+                                                             ,(format #f "/raw/~a"
+                                                                      (pb-entry-id entry))))
+                                                         "raw"))))
                                               top5))))))
                    (display "<!DOCTYPE html>\n" port)
                    (sxml->xml sxml port))))))))
